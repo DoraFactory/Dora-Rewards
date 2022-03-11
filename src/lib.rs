@@ -63,10 +63,7 @@ pub mod pallet {
 		fn on_finalize(_n: T::BlockNumber) {
 			let acc = T::Currency::free_balance(&Self::account_id());
 			let acc_balance: u128 = acc.saturated_into();
-			// 每个区块查看一次pallet account余额
-			log::info!("当前pallet的账户可以资产为:{:?}", acc);
-			// 每次产生区块都检查pallet account是否有钱，如果有，pallet account
-			// 会进行代币分发，每个区块分发给参与者1个DORA代币
+			log::info!(":{:?}", acc);
 			if acc_balance != 0 {
 				//TODO:
 				// read contributors list and will be distributed
@@ -82,8 +79,6 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		// 开始分发奖励，通过一个已有的账户的资产，发出一些钱
-		// 这个钱给Pallet account自己去分发
 		#[pallet::weight(0)]
 		pub fn start_distribute(
 			origin: OriginFor<T>,
@@ -93,7 +88,6 @@ pub mod pallet {
 			T::Currency::transfer(
 				&who,
 				&Self::account_id(),
-				// 给pallet account 代币
 				value,
 				ExistenceRequirement::KeepAlive,
 			);
@@ -118,9 +112,8 @@ pub mod pallet {
 			PALLET_ID.into_account()
 		}
 
-		// 由Pallet accountId进行分发
+		// distributed by Pallet account
 		pub fn distribut_to_contributors(
-			// 后续改为Vec
 			contributor_account: T::AccountId,
 			value: u128,
 		) {
@@ -136,7 +129,7 @@ pub mod pallet {
 
 
 
-		//TODO: implement计算需要分发的金额，总的金额，以及实际发放的比例
+		//TODO: compute vest amount
 		// pub fn compute_Vest_once() -> u32{
 
 		// }
