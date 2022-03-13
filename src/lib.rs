@@ -11,8 +11,11 @@ pub mod pallet {
 		PalletId,
 	};
 	use frame_system::pallet_prelude::*;
-	use sp_runtime::{traits::AccountIdConversion, SaturatedConversion};
-	use sp_std::{prelude::*, vec::Vec};
+	use sp_runtime::{
+		traits::{AccountIdConversion, AtLeast32BitUnsigned, BlockNumberProvider, Saturating},
+		Perbill, SaturatedConversion,
+	};
+	use sp_std::prelude::*;
 	pub type BalanceOf<T> =
 		<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -24,62 +27,69 @@ pub mod pallet {
 
 	pub const PALLET_ID: PalletId = PalletId(*b"DoraRewa");
 
-	pub const VESTAMOUNT: u128 = 1000000000000;
-
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 
 		type Currency: Currency<Self::AccountId> + ReservableCurrency<Self::AccountId>;
 
-		//Set VestPercentage of contributions (1 KSM / DOT : xxx DORA)
-		// #[pallet::constant]
-		// type VestPercentage: Get<u32>;
+		// tracking the vesting process
+		type VestingBlockNumber: AtLeast32BitUnsigned + Parameter + Default + Into<BalanceOf<Self>>;
 
-		// One-time distribution ratio after the auction, and the left will be distribute by linear
-		// #[pallet::constant]
-		// type VestRatioOnce: Get<u32>;
+		// get the blocknumber by this provider
+		type VestingBlockProvider: BlockNumberProvider<BlockNumber = Self::VestingBlockNumber>;
+
+		// the first reward percentage of total reward
+		type FirstVestPercentage: Get<Perbill>;
 
 		// max contributors number at once
 		// #[pallet::constant]
-		// type MaxContributrsNum: Get<u32>;
+		// type MaxContributorsNum: Get<u32>;
 	}
 
-	// single beneficiary account for test the auto distribute
-	#[pallet::storage]
-	#[pallet::getter(fn contrbutor)]
-	pub type Contributor<T: Config> = StorageValue<_, T::AccountId>;
+	//
+	// record the contributor's reward info
+	//
+	#[derive(Default, Clone, Encode, Decode, RuntimeDebug, PartialEq, scale_info::TypeInfo)]
+	#[scale_info(skip_type_params(T))]
+	pub struct RewardInfo<T: Config> {
+		pub total_reward: BalanceOf<T>,
+		pub claimed_reward: BalanceOf<T>,
+		pub track_block_number: T::VestingBlockNumber,
+	}
 
-	//
-	// 	contributors list:{  accountId  =>  contributions amount  }
-	//
 	#[pallet::storage]
-	#[pallet::getter(fn contributor_list)]
-	pub type ContributorList<T: Config> =
-		StorageMap<_, Blake2_128Concat, T::AccountId, BalanceOf<T>, OptionQuery>;
+	#[pallet::storage_prefix = "InitBlock"]
+	#[pallet::getter(fn init_vesting_block)]
+	/// Vesting block height at the initialization of the pallet
+	type InitVestingBlock<T: Config> = StorageValue<_, T::VestingBlockNumber, ValueQuery>;
 
-	//
-	// contributors rewards list : contributor account => how much money(this is the total rewards)
-	//
 	#[pallet::storage]
-	#[pallet::getter(fn contributors_rewards)]
-	pub type ContributorRewards<T: Config> =
-		StorageMap<_, Blake2_128Concat, T::AccountId, BalanceOf<T>, OptionQuery>;
+	#[pallet::storage_prefix = "EndBlock"]
+	#[pallet::getter(fn end_vesting_block)]
+	/// Vesting block height at the initialization of the pallet
+	type EndVestingBlock<T: Config> = StorageValue<_, T::VestingBlockNumber, ValueQuery>;
+
+	// record contributor's info (total reward, claimed reward, claim linear block track)
+	#[pallet::storage]
+	#[pallet::getter(fn rewards_info)]
+	type ContributorsInfo<T: Config> =
+		StorageMap<_, Blake2_128Concat, T::AccountId, RewardInfo<T>, OptionQuery>;
 
 	// Errors.
 	#[pallet::error]
-	pub enum Error<T> {}
+	pub enum Error<T> {
+		// invalid account (not exist in contributor list)
+		NotInContributorList,
+	}
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		// update the contributors list
-		UpdateContributorsList(T::AccountId, BalanceOf<T>),
+		// update contributor's reward info(accountId, claimed reward, left reward)
+		UpdateContributorsInfo(T::AccountId, BalanceOf<T>, BalanceOf<T>),
 		// distribute Vest <source account, destination account, amount>
-		DistributeVest(T::AccountId, T::AccountId, BalanceOf<T>),
-		// 
-		LeftRewards(T::AccountId, BalanceOf<T>),
-		//
+		DistributeReward(T::AccountId, T::AccountId, BalanceOf<T>),
 	}
 
 	//
@@ -88,48 +98,15 @@ pub mod pallet {
 	//
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-		fn on_finalize(n: T::BlockNumber) {
+		fn on_finalize(n: <T as frame_system::Config>::BlockNumber) {
 			let pallet_acc = T::Currency::free_balance(&Self::account_id());
 			let pallet_balance: u128 = pallet_acc.clone().saturated_into();
 			log::info!("current pallet account balance is : {:?}", pallet_balance);
 			// if the auction complete at 40th block, we can distribute 20% rewards to contributors
 			log::info!("current block number is {:?}", n);
+			// record the first block is the initialization of vesting
 			if n == 1u32.into() {
-				log::info!("This is hahaha!!!!!!!!!!!!!")
-			}
-			if n == 15u32.into() {
-				let rewards_list_iter = <ContributorRewards<T>>::iter();
-				for (acc, total_rewards) in rewards_list_iter {
-					Self::distribute_to_contributors(
-						acc.clone(),
-						total_rewards.saturated_into::<u128>() * 20 / 100,
-					);
-					Self::deposit_event(<Event<T>>::DistributeVest(Self::account_id(),acc.clone(), (total_rewards.saturated_into::<u128>() * 20 / 100).saturated_into::<BalanceOf<T>>()));
-					let left_rewards:u128 = total_rewards.saturated_into::<u128>() - total_rewards.saturated_into::<u128>() * 20 / 100;
-					// update the total rewards to left rewards
-					<ContributorRewards<T>>::insert(
-						acc.clone(),
-						left_rewards.saturated_into::<BalanceOf<T>>(),
-					);
-				}
-			}
-
-			if n > 20u32.into() {
-				let rewards_iter = <ContributorRewards<T>>::iter();
-				for (acc, left_rewards) in rewards_iter {
-					// if the left reward < 10 ,则不进行分发了
-					if left_rewards.saturated_into::<u128>() < 10 {
-						break;
-					}
-					let rewards_per_block = left_rewards.saturated_into::<u128>() * 2 / 100;
-					// distribute rewards by linear with block
-					Self::distribute_to_contributors(
-						acc.clone(),
-						// each block distribute 2% left rewards
-						rewards_per_block,
-					);
-					Self::deposit_event(<Event<T>>::DistributeVest(Self::account_id(), acc, rewards_per_block.saturated_into::<BalanceOf<T>>()));
-				}
+				<InitVestingBlock<T>>::put(T::VestingBlockProvider::current_block_number());
 			}
 		}
 	}
@@ -149,7 +126,7 @@ pub mod pallet {
 
 	#[pallet::genesis_build]
 	impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
-		// This sets the funds of the crowdloan pallet
+		// This sets the funds of this Reward pallet
 		fn build(&self) {
 			T::Currency::deposit_creating(&Pallet::<T>::account_id(), self.funded_amount);
 		}
@@ -157,41 +134,148 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
+		//
+		// provid contributors claim for their rewards
+		//
 		#[pallet::weight(0)]
-		pub fn start_distribute(
-			origin: OriginFor<T>,
-			#[pallet::compact] value: BalanceOf<T>,
-		) -> DispatchResult {
+		pub fn claim_rewards(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			T::Currency::transfer(
-				&who,
-				&Self::account_id(),
-				value,
-				ExistenceRequirement::KeepAlive,
-			);
+
+			// check current acccount is in the contributor list ?
+			// ensure!(
+			// 	<ContributorsInfo<T>>::contains_key(who.clone()),
+			// 	Error::<T>::NotInContributorList
+			// );
+			// if exist, get his reward info
+			let contribute_info = <ContributorsInfo<T>>::get(who.clone()).ok_or(Error::<T>::NotInContributorList)?;
+
+			// compute the total linear reward block(ending lease - start lease)
+			//TODO: 无符号数减法，如果一开始是0，没有初始化的话， 这个总的区块发放周期是非常大的一个数！！！！，这里需要进行判断是够已经设置了end lease!!!
+			let total_reward_period = <EndVestingBlock<T>>::get() - <InitVestingBlock<T>>::get();
+			log::info!("总的区块奖励周期为：{:?}", total_reward_period);
+
+			let now = T::VestingBlockProvider::current_block_number();
+
+			// compute the fist reward with total reward by the percentage
+			let first_reward = T::FirstVestPercentage::get() * contribute_info.total_reward;
+			log::info!("当前账户的一次性发放奖励为:{:?}", first_reward);
+			log::info!("剩余待发放奖励为:{:?}", contribute_info.total_reward - first_reward);
+
+			let left_linear_reward = contribute_info.total_reward - first_reward;
+			// Get the current left reward
+			let coming_reward = if contribute_info.claimed_reward == 0u32.into() {
+				// if current user never claim the rewards, diostribute `fisrt reward` + `current
+				// linear block reward` get the linear reward block number from the first block to
+				// current block
+				let curr_linear_reward_period =
+					now.clone().saturating_sub(<InitVestingBlock<T>>::get());
+				log::info!("当前线性奖励区块数为 :{:?}", curr_linear_reward_period);
+				let current_linear_reward = left_linear_reward
+					.saturating_mul(curr_linear_reward_period.into()) /
+					total_reward_period.into();
+				log::info!("当前区块线性奖励为:{:?}", current_linear_reward);
+				// track the current claimed block for the next claim
+				// update the claimed reward and track block number
+				let new_contribute_info = RewardInfo {
+					total_reward: contribute_info.total_reward,
+					claimed_reward: first_reward + current_linear_reward,
+					track_block_number: now.clone(),
+				};
+				<ContributorsInfo<T>>::insert(who.clone(), new_contribute_info);
+				Self::deposit_event(<Event<T>>::UpdateContributorsInfo(
+					who.clone(),
+					contribute_info.total_reward,
+					first_reward + current_linear_reward,
+				));
+				log::info!("首次领取奖励为：{:?}", first_reward + current_linear_reward);
+				first_reward + current_linear_reward
+			} else {
+				// if current user have get some rewards, but the lease is not ending, get the
+				// latest linear block reward compute by the block period: now block number - last
+				// track block number
+
+				// if achieve the end lease block, the claimed reward < total reward, distribute the left reward to
+				if contribute_info.track_block_number == <EndVestingBlock<T>>::get() {
+					if contribute_info.claimed_reward < contribute_info.total_reward {
+						// TODO: 解决一下边界问题
+						contribute_info.total_reward - contribute_info.claimed_reward
+					} else {
+						0u32.into()
+					}
+				} else {
+					let curr_linear_reward_period =
+						now.clone().saturating_sub(contribute_info.track_block_number);
+					log::info!("当前线性奖励区块数为 :{:?}", curr_linear_reward_period);
+					let current_linear_reward = left_linear_reward
+						.saturating_mul(curr_linear_reward_period.into()) /
+						total_reward_period.into();
+					log::info!("当前区块线性奖励为:{:?}", current_linear_reward);
+					let new_contribute_info = RewardInfo {
+						total_reward: contribute_info.total_reward,
+						claimed_reward: contribute_info.claimed_reward + current_linear_reward,
+						track_block_number: now.clone(),
+					};
+					<ContributorsInfo<T>>::insert(who.clone(), new_contribute_info);
+					current_linear_reward
+				}
+			};
+
+			// distribute current reward to contributor
+			Self::distribute_to_contributors(who.clone(), coming_reward.saturated_into::<u128>())?;
+			Self::deposit_event(<Event<T>>::DistributeReward(
+				Self::account_id(),
+				who.clone(),
+				coming_reward.saturated_into::<BalanceOf<T>>(),
+			));
 			Ok(().into())
 		}
 
-		// set an account to be disstributed, eg: here, we set a contributor
+		///
+		///  step 1:
+		///  set a contributors rewards info
+		///  this operation should be execute by sudo user
 		#[pallet::weight(0)]
-		pub fn set_contributor(origin: OriginFor<T>, contributor: T::AccountId) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-			<Contributor<T>>::put(contributor);
-			Ok(().into())
-		}
-
-		// set a contributors list
-		#[pallet::weight(0)]
-		pub fn set_contributors_list(
+		pub fn initialize_contributors_list(
 			origin: OriginFor<T>,
-			acc: T::AccountId,
+			contributor_account: T::AccountId,
 			// contribute XXX KSM/DOT
-			#[pallet::compact] value: BalanceOf<T>,
+			#[pallet::compact] contribution_value: BalanceOf<T>,
 		) -> DispatchResult {
+			//TODO: this origin should be sudo
+			// ensure_root(origin)?;
 			let _who = ensure_signed(origin)?;
 			// update the contributors list
-			<ContributorList<T>>::insert(acc.clone(), value);
-			Self::deposit_event(Event::UpdateContributorsList(acc, value));
+			// compute contributor's total rewards
+			let total_reward =
+				(contribution_value.saturated_into::<u128>() * 3).saturated_into::<BalanceOf<T>>();
+			// initialize the contrbutor's rewards info
+			let reward_info = RewardInfo {
+				total_reward,
+				claimed_reward: 0u128.saturated_into::<BalanceOf<T>>(),
+				track_block_number: 1u32.into(),
+			};
+			<ContributorsInfo<T>>::insert(contributor_account.clone(), reward_info.clone());
+			Self::deposit_event(Event::UpdateContributorsInfo(
+				contributor_account.clone(),
+				total_reward,
+				0u128.saturated_into::<BalanceOf<T>>(),
+			));
+			Ok(().into())
+		}
+
+		//
+		//  step2:
+		// 	check the lease ending block
+		//
+		#[pallet::weight(0)]
+		pub fn complete_initialization(
+			origin: OriginFor<T>,
+			lease_ending_block: T::VestingBlockNumber,
+		) -> DispatchResult {
+			//TODO: sudo
+			// ensure_signed(root)?;
+			let _who = ensure_signed(origin)?;
+			<EndVestingBlock<T>>::put(lease_ending_block);
 			Ok(().into())
 		}
 	}
@@ -206,28 +290,17 @@ pub mod pallet {
 		}
 
 		// distributed by Pallet account
-		pub fn distribute_to_contributors(contributor_account: T::AccountId, value: u128) {
-			let pallet_acc = &Self::account_id();
+		pub fn distribute_to_contributors(
+			contributor_account: T::AccountId,
+			value: u128,
+		) -> DispatchResult {
 			T::Currency::transfer(
-				pallet_acc,
+				&Self::account_id(),
 				&contributor_account,
 				value.saturated_into(),
 				ExistenceRequirement::AllowDeath,
-			);
-		}
-
-		// compute total vest amount of every contributor
-		pub fn compute_vest_first() {
-			let contributors_iter = <ContributorList<T>>::iter();
-			// compute the total rewards of contributor's account by his amount of contributions
-			for (acc, contrinutions) in contributors_iter {
-				// contribute one KSM/DOT can get some DORA => rewards
-				let total_rewards: u128 = contrinutions.saturated_into::<u128>() * 3;
-				<ContributorRewards<T>>::insert(
-					acc,
-					total_rewards.saturated_into::<BalanceOf<T>>(),
-				);
-			}
+			)?;
+			Ok(().into())
 		}
 	}
 }
