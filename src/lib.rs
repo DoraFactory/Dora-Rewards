@@ -248,8 +248,8 @@ pub mod pallet {
 			// contribute XXX KSM/DOT
 			#[pallet::compact] contribution_value: BalanceOf<T>,
 		) -> DispatchResult {
-			// ensure_root(origin)?;
-			let _who = ensure_signed(origin)?;
+			ensure_root(origin)?;
+			// let _who = ensure_signed(origin)?;
 			// update the contributors list
 			// compute contributor's total rewards
 			let total_reward =
@@ -279,8 +279,8 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			lease_ending_block: T::VestingBlockNumber,
 		) -> DispatchResult {
-			// ensure_root(origin)?;
-			let _who = ensure_signed(origin)?;
+			ensure_root(origin)?;
+			// let _who = ensure_signed(origin)?;
 			// ending lease block should higher than the init lease block, invalid setting will cause overflow
 			ensure!(
 				lease_ending_block > <InitVestingBlock<T>>::get(),
