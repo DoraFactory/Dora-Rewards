@@ -122,6 +122,7 @@ parameter_types! {
 	pub const FirstVestPercentage: Perbill = Perbill::from_percent(20);
 }
 
+// dora reward pallet config
 impl Config for Test {
 	type Event = Event;
 	type Currency = Balances;
@@ -144,22 +145,6 @@ fn genesis(funded_amount: Balance) -> sp_io::TestExternalities {
 	ext
 }
 
-pub type UtilityCall = pallet_utility::Call<Test>;
-
-pub(crate) fn get_ed25519_pairs(num: u32) -> Vec<ed25519::Pair> {
-	let seed: u128 = 12345678901234567890123456789012;
-	let mut pairs = Vec::new();
-	for i in 0..num {
-		pairs.push(ed25519::Pair::from_seed(
-			(seed.clone() + i as u128)
-				.to_string()
-				.as_bytes()
-				.try_into()
-				.unwrap(),
-		))
-	}
-	pairs
-}
 
 pub(crate) fn empty() -> sp_io::TestExternalities {
 	genesis(2500u32.into())

@@ -11,6 +11,7 @@ pub mod pallet {
 		PalletId,
 	};
 	use frame_system::pallet_prelude::*;
+	use log::log;
 	use sp_runtime::{
 		traits::{AccountIdConversion, AtLeast32BitUnsigned, BlockNumberProvider, Saturating},
 		Perbill, SaturatedConversion,
@@ -41,10 +42,6 @@ pub mod pallet {
 
 		// the first reward percentage of total reward
 		type FirstVestPercentage: Get<Perbill>;
-
-		// max contributors number at once
-		// #[pallet::constant]
-		// type MaxContributorsNum: Get<u32>;
 	}
 
 	//
@@ -81,6 +78,12 @@ pub mod pallet {
 	pub enum Error<T> {
 		// invalid account (not exist in contributor list)
 		NotInContributorList,
+		// No setting in Ending lease block
+		NotSettingEndingLeaseBlock,
+		// Ending lease block setting error
+		InvalidEndingLeaseBlock,
+		// claimed all the reward
+		NoLeftRewards,
 	}
 
 	#[pallet::event]
@@ -90,6 +93,8 @@ pub mod pallet {
 		UpdateContributorsInfo(T::AccountId, BalanceOf<T>, BalanceOf<T>),
 		// distribute Vest <source account, destination account, amount>
 		DistributeReward(T::AccountId, T::AccountId, BalanceOf<T>),
+		// set end lease block
+		EndleasingBlock(T::VestingBlockNumber),
 	}
 
 	//
@@ -102,9 +107,9 @@ pub mod pallet {
 			let pallet_acc = T::Currency::free_balance(&Self::account_id());
 			let pallet_balance: u128 = pallet_acc.clone().saturated_into();
 			log::info!("current pallet account balance is : {:?}", pallet_balance);
-			// if the auction complete at 40th block, we can distribute 20% rewards to contributors
 			log::info!("current block number is {:?}", n);
-			// record the first block is the initialization of vesting
+			// record the block number in relaychain when our parachain launch it.
+			// this time means our reward is starting...
 			if n == 1u32.into() {
 				<InitVestingBlock<T>>::put(T::VestingBlockProvider::current_block_number());
 			}
@@ -126,7 +131,7 @@ pub mod pallet {
 
 	#[pallet::genesis_build]
 	impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
-		// This sets the funds of this Reward pallet
+		// This sets the pre-funds of this Reward pallet
 		fn build(&self) {
 			T::Currency::deposit_creating(&Pallet::<T>::account_id(), self.funded_amount);
 		}
@@ -140,41 +145,51 @@ pub mod pallet {
 		#[pallet::weight(0)]
 		pub fn claim_rewards(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-
 			// check current acccount is in the contributor list ?
-			// ensure!(
-			// 	<ContributorsInfo<T>>::contains_key(who.clone()),
-			// 	Error::<T>::NotInContributorList
-			// );
 			// if exist, get his reward info
-			let contribute_info = <ContributorsInfo<T>>::get(who.clone()).ok_or(Error::<T>::NotInContributorList)?;
+			let contribute_info =
+				<ContributorsInfo<T>>::get(who.clone()).ok_or(Error::<T>::NotInContributorList)?;
+
+			// ensure we have set the ending lease block
+			ensure!(
+				<EndVestingBlock<T>>::get() != 0u32.into(),
+				<Error<T>>::NotSettingEndingLeaseBlock,
+			);
+
+			// if contributor's claimed reward reach his total reward, don't send DORA
+			ensure!(
+				contribute_info.claimed_reward < contribute_info.total_reward,
+				<Error<T>>::NoLeftRewards,
+			);
 
 			// compute the total linear reward block(ending lease - start lease)
-			//TODO: 无符号数减法，如果一开始是0，没有初始化的话， 这个总的区块发放周期是非常大的一个数！！！！，这里需要进行判断是够已经设置了end lease!!!
 			let total_reward_period = <EndVestingBlock<T>>::get() - <InitVestingBlock<T>>::get();
-			log::info!("总的区块奖励周期为：{:?}", total_reward_period);
 
-			let now = T::VestingBlockProvider::current_block_number();
+			// if current block height bigger than ending lease block ? this operation need??
+			let now =
+				if T::VestingBlockProvider::current_block_number() >= <EndVestingBlock<T>>::get() {
+					<EndVestingBlock<T>>::get()
+				} else {
+					T::VestingBlockProvider::current_block_number()
+				};
 
 			// compute the fist reward with total reward by the percentage
 			let first_reward = T::FirstVestPercentage::get() * contribute_info.total_reward;
-			log::info!("当前账户的一次性发放奖励为:{:?}", first_reward);
-			log::info!("剩余待发放奖励为:{:?}", contribute_info.total_reward - first_reward);
 
 			let left_linear_reward = contribute_info.total_reward - first_reward;
+
+			let curr_linear_reward_period =
+				now.clone().saturating_sub(contribute_info.track_block_number.clone());
+			let current_linear_reward = left_linear_reward
+				.saturating_mul(curr_linear_reward_period.into()) /
+				total_reward_period.into();
+
 			// Get the current left reward
 			let coming_reward = if contribute_info.claimed_reward == 0u32.into() {
-				// if current user never claim the rewards, diostribute `fisrt reward` + `current
-				// linear block reward` get the linear reward block number from the first block to
+				// if current user never claim the rewards, distribute `fisrt reward` + `current
+				// linear block reward`. Get the linear reward block number from the first block to
 				// current block
-				let curr_linear_reward_period =
-					now.clone().saturating_sub(<InitVestingBlock<T>>::get());
-				log::info!("当前线性奖励区块数为 :{:?}", curr_linear_reward_period);
-				let current_linear_reward = left_linear_reward
-					.saturating_mul(curr_linear_reward_period.into()) /
-					total_reward_period.into();
-				log::info!("当前区块线性奖励为:{:?}", current_linear_reward);
-				// track the current claimed block for the next claim
+
 				// update the claimed reward and track block number
 				let new_contribute_info = RewardInfo {
 					total_reward: contribute_info.total_reward,
@@ -187,35 +202,27 @@ pub mod pallet {
 					contribute_info.total_reward,
 					first_reward + current_linear_reward,
 				));
-				log::info!("首次领取奖励为：{:?}", first_reward + current_linear_reward);
 				first_reward + current_linear_reward
 			} else {
-				// if current user have get some rewards, but the lease is not ending, get the
+				// if current user have got some rewards, but the lease is not ending, get the
 				// latest linear block reward compute by the block period: now block number - last
 				// track block number
 
-				// if achieve the end lease block, the claimed reward < total reward, distribute the left reward to
-				if contribute_info.track_block_number == <EndVestingBlock<T>>::get() {
-					if contribute_info.claimed_reward < contribute_info.total_reward {
-						// TODO: 解决一下边界问题
-						contribute_info.total_reward - contribute_info.claimed_reward
-					} else {
-						0u32.into()
-					}
+				// if reach or higher the end lease block, the claimed reward < total reward, distribute the left reward
+				if contribute_info.track_block_number >= <EndVestingBlock<T>>::get() {
+					contribute_info.total_reward - contribute_info.claimed_reward
 				} else {
-					let curr_linear_reward_period =
-						now.clone().saturating_sub(contribute_info.track_block_number);
-					log::info!("当前线性奖励区块数为 :{:?}", curr_linear_reward_period);
-					let current_linear_reward = left_linear_reward
-						.saturating_mul(curr_linear_reward_period.into()) /
-						total_reward_period.into();
-					log::info!("当前区块线性奖励为:{:?}", current_linear_reward);
 					let new_contribute_info = RewardInfo {
 						total_reward: contribute_info.total_reward,
 						claimed_reward: contribute_info.claimed_reward + current_linear_reward,
 						track_block_number: now.clone(),
 					};
 					<ContributorsInfo<T>>::insert(who.clone(), new_contribute_info);
+					Self::deposit_event(<Event<T>>::UpdateContributorsInfo(
+						who.clone(),
+						contribute_info.total_reward,
+						contribute_info.claimed_reward + current_linear_reward,
+					));
 					current_linear_reward
 				}
 			};
@@ -241,7 +248,6 @@ pub mod pallet {
 			// contribute XXX KSM/DOT
 			#[pallet::compact] contribution_value: BalanceOf<T>,
 		) -> DispatchResult {
-			//TODO: this origin should be sudo
 			// ensure_root(origin)?;
 			let _who = ensure_signed(origin)?;
 			// update the contributors list
@@ -249,10 +255,11 @@ pub mod pallet {
 			let total_reward =
 				(contribution_value.saturated_into::<u128>() * 3).saturated_into::<BalanceOf<T>>();
 			// initialize the contrbutor's rewards info
+			log::info!("Initializing block is :{:?}", <InitVestingBlock<T>>::get());
 			let reward_info = RewardInfo {
 				total_reward,
 				claimed_reward: 0u128.saturated_into::<BalanceOf<T>>(),
-				track_block_number: 1u32.into(),
+				track_block_number: <InitVestingBlock<T>>::get(),
 			};
 			<ContributorsInfo<T>>::insert(contributor_account.clone(), reward_info.clone());
 			Self::deposit_event(Event::UpdateContributorsInfo(
@@ -272,10 +279,17 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			lease_ending_block: T::VestingBlockNumber,
 		) -> DispatchResult {
-			//TODO: sudo
-			// ensure_signed(root)?;
+			// ensure_root(origin)?;
 			let _who = ensure_signed(origin)?;
-			<EndVestingBlock<T>>::put(lease_ending_block);
+			// ending lease block should higher than the init lease block, invalid setting will cause overflow
+			ensure!(
+				lease_ending_block > <InitVestingBlock<T>>::get(),
+				<Error<T>>::InvalidEndingLeaseBlock,
+			);
+
+			<EndVestingBlock<T>>::put(lease_ending_block.clone());
+			Self::deposit_event(<Event<T>>::EndleasingBlock(lease_ending_block.clone()));
+
 			Ok(().into())
 		}
 	}
