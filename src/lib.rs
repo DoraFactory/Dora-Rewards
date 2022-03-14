@@ -104,10 +104,6 @@ pub mod pallet {
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 		fn on_finalize(n: <T as frame_system::Config>::BlockNumber) {
-			let pallet_acc = T::Currency::free_balance(&Self::account_id());
-			let pallet_balance: u128 = pallet_acc.clone().saturated_into();
-			log::info!("current pallet account balance is : {:?}", pallet_balance);
-			log::info!("current block number is {:?}", n);
 			// record the block number in relaychain when our parachain launch it.
 			// this time means our reward is starting...
 			if n == 1u32.into() {
