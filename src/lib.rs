@@ -16,7 +16,8 @@ pub mod pallet {
 		traits::{AccountIdConversion, AtLeast32BitUnsigned, BlockNumberProvider, Saturating},
 		Perbill, SaturatedConversion,
 	};
-	use sp_std::prelude::*;
+	use sp_std::{prelude::*, vec, vec::Vec};
+
 	pub type BalanceOf<T> =
 		<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -42,6 +43,10 @@ pub mod pallet {
 
 		// the first reward percentage of total reward
 		type FirstVestPercentage: Get<Perbill>;
+
+		// this parameter control the max contributor list length
+		#[pallet::constant]
+		type MaxContributorsNumber: Get<u32>;
 	}
 
 	//
@@ -84,6 +89,8 @@ pub mod pallet {
 		InvalidEndingLeaseBlock,
 		// claimed all the reward
 		NoLeftRewards,
+		// exceed the contributor number
+		TooManyContributors,
 	}
 
 	#[pallet::event]
@@ -240,29 +247,35 @@ pub mod pallet {
 		#[pallet::weight(0)]
 		pub fn initialize_contributors_list(
 			origin: OriginFor<T>,
-			contributor_account: T::AccountId,
-			// contribute XXX KSM/DOT
-			#[pallet::compact] contribution_value: BalanceOf<T>,
+			//import contributor list
+			contributor_list: Vec<(T::AccountId, BalanceOf<T>)>,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			// let _who = ensure_signed(origin)?;
+			// ensure don;t exceed contributor list length
+			ensure!(
+				contributor_list.len() as u32 <= T::MaxContributorsNumber::get(),
+				<Error<T>>::TooManyContributors,
+			);
 			// update the contributors list
-			// compute contributor's total rewards
-			let total_reward =
-				(contribution_value.saturated_into::<u128>() * 3).saturated_into::<BalanceOf<T>>();
-			// initialize the contrbutor's rewards info
-			log::info!("Initializing block is :{:?}", <InitVestingBlock<T>>::get());
-			let reward_info = RewardInfo {
-				total_reward,
-				claimed_reward: 0u128.saturated_into::<BalanceOf<T>>(),
-				track_block_number: <InitVestingBlock<T>>::get(),
-			};
-			<ContributorsInfo<T>>::insert(contributor_account.clone(), reward_info.clone());
-			Self::deposit_event(Event::UpdateContributorsInfo(
-				contributor_account.clone(),
-				total_reward,
-				0u128.saturated_into::<BalanceOf<T>>(),
-			));
+			for (contributor_account, contribution_value) in &contributor_list {
+				// compute contributor's total rewards
+				let total_reward = (contribution_value.saturating_mul(3u32.into()))
+					.saturated_into::<BalanceOf<T>>();
+				// initialize the contrbutor's rewards info
+				log::info!("Initializing block is :{:?}", <InitVestingBlock<T>>::get());
+				let reward_info = RewardInfo {
+					total_reward,
+					claimed_reward: 0u128.saturated_into::<BalanceOf<T>>(),
+					track_block_number: <InitVestingBlock<T>>::get(),
+				};
+				<ContributorsInfo<T>>::insert(contributor_account.clone(), reward_info.clone());
+				Self::deposit_event(Event::UpdateContributorsInfo(
+					contributor_account.clone(),
+					total_reward,
+					0u128.saturated_into::<BalanceOf<T>>(),
+				));
+			}
+
 			Ok(().into())
 		}
 
@@ -276,7 +289,6 @@ pub mod pallet {
 			lease_ending_block: T::VestingBlockNumber,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			// let _who = ensure_signed(origin)?;
 			// ending lease block should higher than the init lease block, invalid setting will cause overflow
 			ensure!(
 				lease_ending_block > <InitVestingBlock<T>>::get(),
