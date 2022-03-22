@@ -10,8 +10,10 @@ pallet-dora-rewards = {git = "https://github.com/DoraFactory/Dora-Rewards", defa
 2. Add some Config in your runtime `lib.rs`
 ```
 parameter_types! {
-    // this first distribution percentage depend on you
+    // this first distribution percentage which depends on you
 	pub const FirstVestPercentage: Perbill = Perbill::from_percent(20);
+	// max contributor limit which depends on you
+	pub const MaxContributorsNumber: u32 = 3;
 }
 
 impl pallet_dora_rewards::Config for Runtime {
